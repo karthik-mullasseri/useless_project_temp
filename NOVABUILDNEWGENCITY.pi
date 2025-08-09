@@ -1,0 +1,113 @@
+import RPi.GPIO as GPIO
+import time
+import cv2
+import subprocess
+from RPLCD.i2c import CharLCD
+
+# GPIO setup
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+# Detect I²C LCD address automatically
+def find_i2c_address():
+    try:
+        output = subprocess.check_output(["i2cdetect", "-y", "1"]).decode()
+        for line in output.split("\n"):
+            parts = line.split()
+            for p in parts:
+                if len(p) == 2 and p != "--":
+                    return int(p, 16)
+    except Exception as e:
+        print("I²C LCD scan failed:", e)
+    return None
+
+lcd_addr = find_i2c_address()
+if lcd_addr is None:
+    print("No I²C LCD found! Check wiring.")
+    exit()
+
+lcd = CharLCD('PCF8574', lcd_addr)
+
+# Ultrasonic sensor and LED pins
+TRIG1, ECHO1 = 23, 24  # Pedestrian
+TRIG2, ECHO2 = 17, 27  # Car
+ped_leds = [5, 6, 13]
+green_led, red_led = 19, 26
+
+for pin in ped_leds + [green_led, red_led]:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, False)
+
+for trig, echo in [(TRIG1, ECHO1), (TRIG2, ECHO2)]:
+    GPIO.setup(trig, GPIO.OUT)
+    GPIO.setup(echo, GPIO.IN)
+    GPIO.output(trig, False)
+
+time.sleep(2)
+
+def distance(trig, echo):
+    GPIO.output(trig, True)
+    time.sleep(0.00001)
+    GPIO.output(trig, False)
+    start = time.time()
+    while GPIO.input(echo) == 0:
+        start = time.time()
+    while GPIO.input(echo) == 1:
+        stop = time.time()
+    dist = ((stop - start) * 34300) / 2
+    return dist
+
+cap = cv2.VideoCapture(0)
+
+try:
+    while True:
+        # Pedestrian path logic
+        d1 = distance(TRIG1, ECHO1)
+        if d1 < 50:
+            for led in ped_leds:
+                GPIO.output(led, False)
+                time.sleep(0.5)
+        else:
+            for led in ped_leds:
+                GPIO.output(led, True)
+                time.sleep(0.5)
+
+        # Car detection and fines
+        d2 = distance(TRIG2, ECHO2)
+        ret, frame = cap.read()
+
+        if d2 < 80 and ret:
+            GPIO.output(green_led, False)
+            GPIO.output(red_led, True)
+
+            # Placeholder: always no helmet (₹1000 fine)
+            for i in range(10, -1, -1):
+                lcd.clear()
+                lcd.write_string("STOP")
+                lcd.crlf()
+                lcd.write_string("Fine: Rs 1000")
+
+                # Display camera with fine
+                disp = frame.copy()
+                cv2.putText(disp, "No Helmet - Fine ₹1000", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.imshow("Helmet Check", disp)
+
+                if cv2.waitKey(1000) & 0xFF == ord('q'):
+                    raise KeyboardInterrupt
+                if distance(TRIG2, ECHO2) > 80:
+                    break
+        else:
+            GPIO.output(green_led, True)
+            GPIO.output(red_led, False)
+            lcd.clear()
+            lcd.write_string("GO")
+            lcd.crlf()
+            lcd.write_string("No car ahead")
+            cv2.destroyWindow("Helmet Check")
+
+except KeyboardInterrupt:
+    GPIO.cleanup()
+    lcd.clear()
+    cap.release()
+    cv2.destroyAllWindows()
